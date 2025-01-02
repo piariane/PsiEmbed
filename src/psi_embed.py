@@ -77,7 +77,6 @@ def driver(keywords):
     default_keywords['num_threads'] = 1
     default_keywords['memory'] = 1000
     default_keywords['charge'] = 0
-    default_keywords['multiplicity'] = 1
     default_keywords['low_level_reference'] = 'rhf'
     default_keywords['high_level_reference'] = 'rhf'
     default_keywords['partition_method'] = 'spade'
@@ -100,6 +99,24 @@ def driver(keywords):
     default_keywords['save_embedded_h_core'] = False
     default_keywords['save_embedded_orbitals'] = False
     default_keywords['run_high_level'] = True
+    # Following keywords introduced by Pi
+    default_keywords['frag_charge'] = 0
+    default_keywords['env_charge'] = 0
+    default_keywords['multiplicity'] = 0 # PySCF specific!!
+    default_keywords['frag_multiplicity'] = 0
+    default_keywords['checkfile'] = None
+    default_keywords['frag_checkfile'] = None
+    default_keywords['scf_converger'] = None
+    default_keywords['n_frozen_core'] = 0
+    default_keywords['n_vir_nos'] = None
+    default_keywords['density_fitting'] = False
+    default_keywords['aux_basis'] = None
+    default_keywords['do_delta_scf'] = False
+    default_keywords['ecp'] = None
+    default_keywords['lowest_level_molden'] = False
+    default_keywords['low_level_molden'] = False
+    default_keywords['frag_molden'] = False
+    default_keywords['spade_method'] = 'old'
 
     # Checking if the necessary keywords have been defined
     assert 'low_level' in keywords, ('\n Choose level of theory',

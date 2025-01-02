@@ -1,5 +1,5 @@
 import os
-import psi4
+#import psi4
 import numpy as np
 import inspect
 import embedding_methods
@@ -21,6 +21,10 @@ def run_closed_shell(keywords):
     else:
         embed = embedding_methods.PySCFEmbed(keywords)
     embed.run_mean_field()
+
+    if keywords['low_level_molden']:
+        embed.print_molden(keywords['low_level_molden'])
+
     embed.header()
     low_level_orbitals = embed.occupied_orbitals
 
@@ -36,16 +40,30 @@ def run_closed_shell(keywords):
         ao_overlap = embed.ao_overlap
         n_act_aos = embed.count_active_aos()
 
-    # Orbital rotation and partition into subsystems A and B
-    rotation_matrix, sigma = embed.orbital_rotation(projection_orbitals,
-        n_act_aos, ao_overlap)
-    n_act_mos, n_env_mos = embed.orbital_partition(sigma)
+    # PM method
+    if keywords['partition_method'] == 'pm' or keywords['partition_method'] == 'boys':
+        nocc_A = int((sum([embed._mol.atom_charge(i) for i in range(keywords['n_active_atoms'])]) 
+                 + -1*keywords['frag_charge'])/2)
+        n_act_mos, n_env_mos, act_orbitals, env_orbitals = embed.PM_localization(
+            projection_orbitals, n_act_aos, keywords['n_active_atoms'],
+            embed._mean_field.mo_occ, nocc_A)
+        embed.n_act_mos = n_act_mos
+        embed.n_env_mos = n_env_mos
+    else:
+        # SPADE
+        # Orbital rotation and partition into subsystems A and B
+        rotation_matrix, sigma = embed.orbital_rotation(projection_orbitals,
+            n_act_aos, ao_overlap)
+        n_act_mos, n_env_mos = embed.orbital_partition(sigma)
 
-    # Defining active and environment orbitals and density
-    act_orbitals = low_level_orbitals @ rotation_matrix.T[:, :n_act_mos]
-    env_orbitals = low_level_orbitals @ rotation_matrix.T[:, n_act_mos:]
+        # Defining active and environment orbitals and density
+        act_orbitals = low_level_orbitals @ rotation_matrix.T[:, :n_act_mos]
+        env_orbitals = low_level_orbitals @ rotation_matrix.T[:, n_act_mos:]
+        embed.n_all_env_mos = env_orbitals.shape[1]
     act_density = 2.0 * act_orbitals @ act_orbitals.T
     env_density = 2.0 * env_orbitals @ env_orbitals.T
+    #CPi pass on density:
+    embed.act_density = act_density
 
     # Retrieving the subsytem energy terms and potential matrices
     e_act, e_xc_act, j_act, k_act, v_xc_act = (
@@ -90,11 +108,11 @@ def run_closed_shell(keywords):
         np.savetxt('embedded_orbitals.txt', act_orbitals)
         embed.outfile.write(' Embedded orbitals saved to '
             + 'embedded_orbitals.txt.\n') 
-    if keywords['run_high_level'] == False:
-        embed.outfile.write(' Requested files generated. Ending PsiEmbed.\n\n') 
-        raise SystemExit(0)
 
     embed.run_mean_field(v_emb)
+
+    if keywords['frag_molden']:
+        embed.print_molden(keywords['frag_molden'])
 
     # Overlap between the C_A determinant and the embedded determinant
     embed.determinant_overlap(act_orbitals)
@@ -109,6 +127,10 @@ def run_closed_shell(keywords):
     correction = (matrix_dot(v_emb, density_emb - act_density))
     e_mf_emb = e_act_emb + e_env + two_e_cross + embed.nre + correction
     embed.print_scf(e_act, e_env, two_e_cross, e_act_emb, correction)
+
+    if keywords['run_high_level'] == False:
+        embed.outfile.write(' Requested files generated. Ending PsiEmbed.\n\n') 
+        raise SystemExit(0)
 
     # --- Post embedded HF calculation ---
     if 'n_cl_shell' not in keywords:
@@ -213,7 +235,7 @@ def run_closed_shell(keywords):
     
 def run_open_shell(keywords):
     """
-    Runs embedded calculation for closed shell references.
+    Runs embedded calculation for open shell references.
 
     Parameters
     ----------
@@ -226,6 +248,10 @@ def run_open_shell(keywords):
     else:
         embed = embedding_methods.PySCFEmbed(keywords)
     embed.run_mean_field()
+
+    if keywords['low_level_molden']:
+        embed.print_molden(keywords['low_level_molden'])
+
     embed.header()
     alpha_occupied_orbitals = embed.alpha_occupied_orbitals
     beta_occupied_orbitals = embed.beta_occupied_orbitals
@@ -245,27 +271,75 @@ def run_open_shell(keywords):
         ao_overlap = embed.ao_overlap
         n_act_aos = embed.count_active_aos(keywords['basis'])
 
-    # Orbital rotation and partition into subsystems A and B
-    alpha_rotation_matrix, alpha_sigma = embed.orbital_rotation(
-        alpha_projection_orbitals, n_act_aos, ao_overlap)
-    beta_rotation_matrix, beta_sigma = embed.orbital_rotation(
-        beta_projection_orbitals, n_act_aos, ao_overlap)
-    alpha_n_act_mos, alpha_n_env_mos, beta_n_act_mos, beta_n_env_mos = (
-        embed.orbital_partition(alpha_sigma, beta_sigma))
+    if keywords['partition_method'] == 'pm' or keywords['partition_method'] == 'boys':
+        # determine number of alpha and beta electrons in fragment 
+        nocc_A = int((sum([embed._mol.atom_charge(i) for i in range(keywords['n_active_atoms'])]) 
+                 + -1*keywords['frag_charge']))
+        beta_nocc_A = (nocc_A - keywords['frag_multiplicity']) // 2
+        alpha_nocc_A = beta_nocc_A + keywords['frag_multiplicity']
+        assert alpha_nocc_A + beta_nocc_A == nocc_A, 'alpha_nocc_A + beta_nocc_A not equal to nocc_A'
+        # alpha orbitals
+        alpha_n_act_mos, alpha_n_env_mos, alpha_act_orbitals, alpha_env_orbitals = embed.PM_localization(
+            alpha_projection_orbitals, n_act_aos, keywords['n_active_atoms'],
+            embed._mean_field.mo_occ[0], alpha_nocc_A)
+        # beta orbitals
+        beta_n_act_mos, beta_n_env_mos, beta_act_orbitals, beta_env_orbitals = embed.PM_localization(
+            beta_projection_orbitals, n_act_aos, keywords['n_active_atoms'], 
+            embed._mean_field.mo_occ[1], beta_nocc_A)
+        embed.n_act_mos = alpha_n_act_mos
+        embed.n_env_mos = alpha_n_env_mos
+        embed.beta_n_act_mos = beta_n_act_mos
+        embed.beta_n_env_mos = beta_n_env_mos
+    else:
+        # SPADE start
+        # Orbital rotation of alpha and beta orbitals
+        alpha_rotation_matrix, alpha_sigma = embed.orbital_rotation(
+            alpha_projection_orbitals, n_act_aos, ao_overlap)
+        beta_rotation_matrix, beta_sigma = embed.orbital_rotation(
+            beta_projection_orbitals, n_act_aos, ao_overlap)
+        # Orbital partition into subsystems A and B using spade
+        if keywords['spade_method'] == 'new':
+            # determine number of alpha and beta electrons in fragment based on charge and spin
+            nocc_A = int((sum([embed._mol.atom_charge(i) for i in range(keywords['n_active_atoms'])]) 
+                     + -1*keywords['frag_charge']))
+            beta_nocc_A = (nocc_A - keywords['frag_multiplicity']) // 2
+            alpha_nocc_A = beta_nocc_A + keywords['frag_multiplicity']
+            assert alpha_nocc_A + beta_nocc_A == nocc_A, 'alpha_nocc_A + beta_nocc_A not equal to nocc_A'
+            alpha_nocc = list(embed._mean_field.mo_occ[0]).count(1)
+            beta_nocc = list(embed._mean_field.mo_occ[1]).count(1)
+            # alpha orbitals
+            alpha_n_act_mos = alpha_nocc_A
+            alpha_n_env_mos = int(alpha_nocc - alpha_nocc_A)
+            # beta orbitals
+            beta_n_act_mos = beta_nocc_A
+            beta_n_env_mos = int(beta_nocc - beta_nocc_A)
+            embed.n_act_mos = alpha_n_act_mos
+            embed.n_env_mos = alpha_n_env_mos
+            embed.beta_n_act_mos = beta_n_act_mos
+            embed.beta_n_env_mos = beta_n_env_mos
+        else:
+            # determine number of alpha and beta electrons in fragment based on sigma vector
+            alpha_n_act_mos, alpha_n_env_mos, beta_n_act_mos, beta_n_env_mos = (
+                embed.orbital_partition(alpha_sigma, beta_sigma))
+        print(f'{alpha_n_act_mos = }')
+        print(f'{beta_n_act_mos = }')
 
-    alpha_act_orbitals = (alpha_occupied_orbitals
-        @ alpha_rotation_matrix.T[:, :alpha_n_act_mos])
-    alpha_env_orbitals = (alpha_occupied_orbitals
-        @ alpha_rotation_matrix.T[:, alpha_n_act_mos:])
-    beta_act_orbitals = (beta_occupied_orbitals
-        @ beta_rotation_matrix.T[:, :beta_n_act_mos])
-    beta_env_orbitals = (beta_occupied_orbitals
-        @ beta_rotation_matrix.T[:, beta_n_act_mos:])
+        # C_{\text{occ}}^{\text{SPADE}} = C_{\text{occ}} V^A
+        alpha_act_orbitals = (alpha_occupied_orbitals @ alpha_rotation_matrix.T[:, :alpha_n_act_mos])
+        alpha_env_orbitals = (alpha_occupied_orbitals @ alpha_rotation_matrix.T[:, alpha_n_act_mos:])
+        beta_act_orbitals = (beta_occupied_orbitals @ beta_rotation_matrix.T[:, :beta_n_act_mos])
+        beta_env_orbitals = (beta_occupied_orbitals @ beta_rotation_matrix.T[:, beta_n_act_mos:])
+        # SPADE stop
+        embed.n_all_env_mos = alpha_env_orbitals.shape[1]
+        embed.beta_n_all_env_mos = beta_env_orbitals.shape[1]
 
     alpha_act_density = alpha_act_orbitals @ alpha_act_orbitals.T
     beta_act_density = beta_act_orbitals @ beta_act_orbitals.T
     alpha_env_density = alpha_env_orbitals @ alpha_env_orbitals.T
     beta_env_density = beta_env_orbitals @ beta_env_orbitals.T
+    #CPi pass density on
+    embed.alpha_act_density = alpha_act_density
+    embed.beta_act_density = beta_act_density 
 
     # Retrieving the subsytem energy terms and potential matrices
     (e_act, e_xc_act, alpha_j_act, beta_j_act, alpha_k_act,
@@ -306,10 +380,10 @@ def run_open_shell(keywords):
         embed.outfile.write(' Cannot save embedded core Hamiltonian for '
             + 'open-shells. Saving the embedding potentials instead.\n') 
     if keywords['save_embedding_potential'] or keywords['save_embedded_h_core']:
-        np.savetxt('alpha_embedding_potential.txt', v_emb)
+        np.savetxt('alpha_embedding_potential.txt', alpha_v_emb)
         embed.outfile.write(' Alpha embedding potential saved to '
             + 'alpha_embedding_potential.txt.\n') 
-        np.savetxt('beta_embedding_potential.txt', v_emb)
+        np.savetxt('beta_embedding_potential.txt', beta_v_emb)
         embed.outfile.write(' Beta embedding potential saved to '
             + 'beta_embedding_potential.txt.\n') 
     if keywords['save_embedded_orbitals']:
@@ -319,9 +393,6 @@ def run_open_shell(keywords):
         np.savetxt('beta_embedded_orbitals.txt', act_orbitals)
         embed.outfile.write(' Beta embedded orbitals saved to '
             + 'beta_embedded_orbitals.txt.\n') 
-    if keywords['run_high_level'] == False:
-        embed.outfile.write(' Requested files generated. Ending PsiEmbed.\n\n') 
-        raise SystemExit(0)
 
     embed.run_mean_field([alpha_v_emb, beta_v_emb])
 
@@ -346,6 +417,13 @@ def run_open_shell(keywords):
                 + matrix_dot(beta_v_emb, beta_density_emb - beta_act_density))
     e_mf_emb = e_act_emb + e_env + two_e_cross + embed.nre + correction
     embed.print_scf(e_act, e_env, two_e_cross, e_act_emb, correction)
+
+    if keywords['frag_molden']:
+        embed.print_molden(keywords['frag_molden'])
+
+    if keywords['run_high_level'] == False:
+        embed.outfile.write(' Requested files generated. Ending PsiEmbed.\n\n') 
+        raise SystemExit(0)
 
     # --- Post embedded HF calculation ---
     if 'n_cl_shell' not in keywords:

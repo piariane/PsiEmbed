@@ -1,8 +1,12 @@
 import numpy as np
-import psi4
+import copy
+#import psi4
 import scipy.linalg
 import sys
-from pyscf import gto, dft, scf, lib, mp, cc
+from pyscf import gto, dft, scf, lib, mp, cc, lo, ao2mo
+from pyscf.mp.dfmp2_native import DFRMP2
+from pyscf.mp.dfump2_native import DFUMP2
+from pyscf.tools import molden
 #import os
 
 class Embed:
@@ -68,9 +72,11 @@ class Embed:
         if ao_overlap is None:
             orthogonal_orbitals = orbitals[:n_active_aos, :]
         else:
+            # \bar{C}_{\text{occ}} = S^{1/2} C_{\text{occ}}
             s_half = scipy.linalg.fractional_matrix_power(ao_overlap, 0.5)
             orthogonal_orbitals = (s_half @ orbitals)[:n_active_aos, :]
 
+        # \bar{C}_{\text{occ}}^A = U^A\Sigma^A V^{*A}
         u, s, v = np.linalg.svd(orthogonal_orbitals, full_matrices=True)
         rotation_matrix = v
         singular_values = s
@@ -125,6 +131,131 @@ class Embed:
                 self.beta_n_env_mos = len(beta_sigma) - self.beta_n_act_mos
             return (self.n_act_mos, self.n_env_mos, self.beta_n_act_mos,
                     self.beta_n_env_mos)
+
+#    def old_PM_localization(self, C_occ, nao_A, n_active_atoms, frag_charge, mo_occ):
+#        # Initialize arrays
+#        S = self.ao_overlap
+#        nao = self._mol.nao
+#        if self._mean_field.mo_occ.shape[0] == 2:
+#            nocc = list(mo_occ).count(1)
+#            nocc_A = int((sum([self._mol.atom_charge(i) for i in range(n_active_atoms)]) + -1*frag_charge))
+#        else:
+#            nocc = list(mo_occ).count(2)
+#            nocc_A = int((sum([self._mol.atom_charge(i) for i in range(n_active_atoms)]) + -1*frag_charge)/2)
+#        nocc_B = int(nocc - nocc_A)
+#        print(f'{nao = }')
+#        print(f'{nocc = }')
+#        print(f'{nocc_A = }')
+#        print(f'{nocc_B = }')
+#        Frgment_LMO_1 = np.zeros((nao, nocc_A))
+#        Frgment_LMO_2 = np.zeros((nao, nocc_B))
+#
+#        # Run localization
+#        #loc = lo.PM(self._mol, mo_coeff=C_occ, init_guess=None)
+#        #local_C_occ = loc.kernel()
+#        loc = lo.PM(self._mol)
+#        local_C_occ = loc.kernel(C_occ)
+#        np.savetxt('PM_orbitals.txt', local_C_occ)
+#
+#        # Identify fragment/environment orbitals
+#        N_fragments = 2
+#        pop = np.zeros((nocc, N_fragments))
+#        for i in range(nocc):
+#            loc_C = local_C_occ[:,i]
+#            dens = np.outer(loc_C,loc_C)
+#            PS = np.dot(dens,S)
+#
+#            pop[i,0] = np.trace(PS[:nao_A,:nao_A])
+#            pop[i,1] = np.trace(PS[nao_A:, nao_A:])
+#
+#        print('pop')
+#        print(pop)
+#        pop_order_1 = np.argsort(-1*pop[:, 0])
+#        pop_order_2 = np.argsort(-1*pop[:, 1])
+#        print(f'{pop_order_1 = }')
+#        print(f'{pop_order_2 = }')
+#
+#        orbid_1 = pop_order_1[:nocc_A]
+#        orbid_2 = pop_order_2[:nocc_B]
+#        #orbid_1 = [9, 1, 0, 18, 5, 11, 10]
+#        #orbid_2 = [12, 16,  2, 17,  8,  4,  3,  7, 14, 13,  6, 15]
+#
+#        print("orbitals assigned to fragment 1:")
+#        print(orbid_1)
+#        print("orbitals assigned to fragment 2:")
+#        print(orbid_2)
+#
+#        for i in range(nocc_A):
+#            Frgment_LMO_1[:,i] = local_C_occ[:,orbid_1[i]]
+#        for i in range(nocc_B):
+#            Frgment_LMO_2[:,i] = local_C_occ[:,orbid_2[i]]
+#
+#        return nocc_A, nocc_B, Frgment_LMO_1, Frgment_LMO_2
+
+    def PM_localization(self, C_occ, nao_A, n_active_atoms, mo_occ, nocc_A):
+        # Initialize arrays
+        S = self.ao_overlap
+        nao = self._mol.nao
+        if self._mean_field.mo_occ.shape[0] == 2:
+            nocc = list(mo_occ).count(1)
+        else:
+            nocc = list(mo_occ).count(2)
+        nocc_B = int(nocc - nocc_A)
+        print(f'{nao = }')
+        print(f'{nocc = }')
+        print(f'{nocc_A = }')
+        print(f'{nocc_B = }')
+        Frgment_LMO_1 = np.zeros((nao, nocc_A))
+        Frgment_LMO_2 = np.zeros((nao, nocc_B))
+
+        # Run localization
+        #loc = lo.PM(self._mol, mo_coeff=C_occ)
+        #local_C_occ = loc.kernel()
+        if self.keywords['partition_method'] == 'pm':
+            loc = lo.PM(self._mol, pop_method='mulliken')
+            local_C_occ = loc.kernel(C_occ)
+            isstable, mo_new = loc.stability_jacobi()
+            while not isstable:
+                loc.kernel(mo_new)
+                isstable, mo_new = loc.stability_jacobi()
+            local_C_occ = mo_new
+        elif self.keywords['partition_method'] == 'boys':
+            loc = lo.Boys(self._mol)
+            local_C_occ = loc.kernel(C_occ)
+
+        # Identify fragment/environment orbitals
+        N_fragments = 2
+        pop = np.zeros((nocc, N_fragments))
+        for i in range(nocc):
+            loc_C = local_C_occ[:,i]
+            dens = np.outer(loc_C,loc_C)
+            PS = np.dot(dens,S)
+
+            pop[i,0] = np.trace(PS[:nao_A,:nao_A])
+            pop[i,1] = np.trace(PS[nao_A:, nao_A:])
+
+        print('pop')
+        print(pop)
+        pop_order_1 = np.argsort(-1*pop[:, 0])
+        pop_order_2 = np.argsort(-1*pop[:, 1])
+        print(f'{pop_order_1 = }')
+        print(f'{pop_order_2 = }')
+
+        orbid_1 = pop_order_1[:nocc_A]
+        orbid_2 = pop_order_2[:nocc_B]
+
+        print("orbitals assigned to fragment 1:")
+        print(orbid_1)
+        print("orbitals assigned to fragment 2:")
+        print(orbid_2)
+
+        for i in range(nocc_A):
+            Frgment_LMO_1[:,i] = local_C_occ[:,orbid_1[i]]
+        for i in range(nocc_B):
+            Frgment_LMO_2[:,i] = local_C_occ[:,orbid_2[i]]
+
+        return nocc_A, nocc_B, Frgment_LMO_1, Frgment_LMO_2
+
 
     def header(self):
         """Prints the header in the output file."""
@@ -210,6 +341,10 @@ class Embed:
                 self.outfile.write((' Orbital partition method: SPADE with ',
                     'occupied space projected onto '
                     + self.keywords['occupied_projection_basis'].upper() + '\n'))
+        elif self.keywords['partition_method'] == 'pm':
+            self.outfile.write(' Orbital partition method: Pipek-Mezey\n')
+        elif self.keywords['partition_method'] == 'boys':
+            self.outfile.write(' Orbital partition method: Boys\n')
         else:
             self.outfile.write(' Orbital partition method: All AOs in '
                 + self.keywords['occupied_projection_basis'].upper()
@@ -389,6 +524,10 @@ class PySCFEmbed(Embed):
         self._mol.atom = self.keywords['geometry']
         self._mol.max_memory = self.keywords['memory']
         self._mol.basis = self.keywords['basis']
+        if self.keywords['ecp']:
+            self._mol.ecp = {self.keywords['ecp'][0]:self.keywords['ecp'][1]}
+        self._mol.spin = self.keywords['multiplicity']
+        self._mol.charge = self.keywords['charge']
         if v_emb is None: # low-level/environment calculation
             self._mol.output = self.keywords['driver_output']
             if self.keywords['low_level'] == 'hf':
@@ -408,10 +547,54 @@ class PySCFEmbed(Embed):
                     self._mean_field = dft.ROKS(self._mol)
             self._mean_field.conv_tol = self.keywords['e_convergence']
             self._mean_field.xc = self.keywords['low_level']
+            #CPi turn on soscf
+            if self.keywords['scf_converger'] == 'soscf':
+                self._mean_field = self._mean_field.newton()
+            if self.keywords['checkfile'] is not None:
+                self._mean_field.chkfile = self.keywords['checkfile']
+                self._mean_field.init_guess = 'chkfile'
             self._mean_field.kernel()
-            self.v_xc_total = self._mean_field.get_veff()
-            self.e_xc_total = self._mean_field.get_veff().exc
-        else:
+            if self.keywords['do_delta_scf'] == True:
+                if self.keywords['lowest_level_molden']:
+                    mf = self._mean_field
+                    mol = self._mol
+                    molden_file = self.keywords['lowest_level_molden']
+                    with open('alpha_'+molden_file, 'w') as f1:
+                        molden.header(mol, f1)
+                        molden.orbital_coeff(mol, f1, mf.mo_coeff[0], ene=mf.mo_energy[0], occ=mf.mo_occ[0])
+                    with open('beta_'+molden_file, 'w') as f1:
+                        molden.header(mol, f1)
+                        molden.orbital_coeff(mol, f1, mf.mo_coeff[1], ene=mf.mo_energy[1], occ=mf.mo_occ[1])
+                mo0 = self._mean_field.mo_coeff
+                occ0 = self._mean_field.mo_occ
+                swap = self.keywords['swap_orbitals']
+                occ0[0][swap[0]] = 0
+                occ0[0][swap[1]] = 1
+                # New SCF caculation 
+                b = scf.UKS(self._mol)
+                b.xc = self.keywords['low_level']
+                #if self.keywords['delta_checkfile'] is not None:
+                #    b.chkfile = self.keywords['delta_checkfile']
+                #    b.init_guess = 'chkfile'
+                # Construct new dnesity matrix with new occpuation pattern
+                dm_u = b.make_rdm1(mo0, occ0)
+                # Apply mom occupation principle
+                b = scf.addons.mom_occ(b, mo0, occ0)
+                # Start new SCF with new density matrix
+                b.scf(dm_u)
+                self._mean_field = b
+                #self._mean_field.mo_occ[0][swap[0]] = 1
+                #self._mean_field.mo_occ[0][swap[1]] = 0
+                #self._mean_field.mo_coeff[0][:,swap[0]] = b.mo_coeff[0][:,swap[1]]
+                #self._mean_field.mo_coeff[0][:,swap[1]] = b.mo_coeff[0][:,swap[0]]
+
+            if self.keywords['low_level'] == 'hf':
+                self.v_xc_total = 0.0
+                self.e_xc_total = 0.0
+            else:
+                self.v_xc_total = self._mean_field.get_veff()
+                self.e_xc_total = self._mean_field.get_veff().exc
+        else: # high-level
             if self.keywords['high_level_reference'].lower() == 'rhf':
                 self._mean_field = scf.RHF(self._mol)
             if self.keywords['high_level_reference'].lower() == 'uhf':
@@ -420,13 +603,67 @@ class PySCFEmbed(Embed):
                 self._mean_field = scf.ROHF(self._mol)
             if self.keywords['low_level_reference'].lower() == 'rhf':
                 self._mol.nelectron = 2*self.n_act_mos
+                # Check whether this is valid when using FNOs
                 self._mean_field.get_hcore = lambda *args: v_emb + self.h_core
             if (self.keywords['low_level_reference'].lower() == 'rohf'
                 or self.keywords['low_level_reference'].lower() == 'uhf'):
                 self._mol.nelectron = self.n_act_mos + self.beta_n_act_mos
                 self._mean_field.get_vemb = lambda *args: v_emb
             self._mean_field.conv_tol = self.keywords['e_convergence']
-            self._mean_field.kernel()
+            if self.keywords['frag_checkfile'] is not None:
+                self._mean_field.chkfile = self.keywords['frag_checkfile']
+                self._mean_field.init_guess = 'chkfile'
+            #CPi turn on soscf
+            if self.keywords['scf_converger'] == 'soscf':
+                self._mean_field = self._mean_field.newton()
+            # Construct new density matrices
+            if self.keywords['high_level_reference'] == 'rhf':
+                self._mean_field.kernel(dm0=self.act_density)
+            else:
+                self._mean_field.kernel(dm0=(self.alpha_act_density, self.beta_act_density))
+            #if self.keywords['analyze_scf']:
+            #    self._mean_field.analyze()
+            if self.keywords['do_frag_delta_scf'] == True: # Hasn't been tested !!
+                if self.keywords['lowest_level_molden']:
+                    mf = self._mean_field
+                    mol = self._mol
+                    molden_file = self.keywords['lowest_level_molden']
+                    with open('alpha_'+molden_file, 'w') as f1:
+                        molden.header(mol, f1)
+                        molden.orbital_coeff(mol, f1, mf.mo_coeff[0], ene=mf.mo_energy[0], occ=mf.mo_occ[0])
+                    with open('beta_'+molden_file, 'w') as f1:
+                        molden.header(mol, f1)
+                        molden.orbital_coeff(mol, f1, mf.mo_coeff[1], ene=mf.mo_energy[1], occ=mf.mo_occ[1])
+                mo0 = self._mean_field.mo_coeff
+                occ0 = self._mean_field.mo_occ
+                swap = self.keywords['swap_orbitals']
+                occ0[0][swap[0]] = 0
+                occ0[0][swap[1]] = 1
+                # New SCF caculation 
+                b = scf.UKS(self._mol)
+                if self.keywords['low_level_reference'].lower() == 'rhf':
+                    b.mol.nelectron = 2*self.n_act_mos
+                    # Check whether this is valid when using FNOs
+                    b.get_hcore = lambda *args: v_emb + self.h_core
+                if (self.keywords['low_level_reference'].lower() == 'rohf'
+                    or self.keywords['low_level_reference'].lower() == 'uhf'):
+                    b.mol.nelectron = self.n_act_mos + self.beta_n_act_mos
+                    b.get_vemb = lambda *args: v_emb
+                b.xc = self.keywords['low_level']
+                #if self.keywords['delta_checkfile'] is not None:
+                #    b.chkfile = self.keywords['delta_checkfile']
+                #    b.init_guess = 'chkfile'
+                # Construct new dnesity matrix with new occpuation pattern
+                dm_u = b.make_rdm1(mo0, occ0)
+                # Apply mom occupation principle
+                b = scf.addons.mom_occ(b, mo0, occ0)
+                # Start new SCF with new density matrix
+                b.scf(dm_u)
+                self._mean_field = b
+                self._mean_field.mo_occ[0][swap[0]] = 1
+                self._mean_field.mo_occ[0][swap[1]] = 0
+                self._mean_field.mo_coeff[0][:,swap[0]] = b.mo_coeff[0][:,swap[1]]
+                self._mean_field.mo_coeff[0][:,swap[1]] = b.mo_coeff[0][:,swap[0]]
 
         if self.keywords['low_level_reference'] == 'rhf':
             docc = (self._mean_field.mo_occ == 2).sum()
@@ -465,6 +702,21 @@ class PySCFEmbed(Embed):
         self.h_core = self._mean_field.get_hcore(self._mol)
         return None
 
+    def print_molden(self, molden_file):
+        mf = self._mean_field
+        mol = self._mol
+        if self.keywords['low_level_reference'].lower() == 'rhf':
+            with open(molden_file, 'w') as f1:
+                molden.header(mol, f1)
+                molden.orbital_coeff(mol, f1, mf.mo_coeff, ene=mf.mo_energy, occ=mf.mo_occ)
+        elif self.keywords['low_level_reference'].lower() == 'uhf':
+            with open('alpha_'+molden_file, 'w') as f1:
+                molden.header(mol, f1)
+                molden.orbital_coeff(mol, f1, mf.mo_coeff[0], ene=mf.mo_energy[0], occ=mf.mo_occ[0])
+            with open('beta_'+molden_file, 'w') as f1:
+                molden.header(mol, f1)
+                molden.orbital_coeff(mol, f1, mf.mo_coeff[1], ene=mf.mo_energy[1], occ=mf.mo_occ[1])
+
     def count_active_aos(self, basis = None):
         """
         Computes the number of AOs from active atoms.
@@ -484,6 +736,8 @@ class PySCFEmbed(Embed):
                 self.keywords['n_active_atoms']-1][3]
         else:
             self._projected_mol = gto.mole.Mole()
+            self._projected_mol.spin = self.keywords['multiplicity']
+            self._projected_mol.charge = self.keywords['charge']
             self._projected_mol.atom = self.keywords['geometry']
             self._projected_mol.basis = basis 
             self._projected_mf = scf.RHF(self._projected_mol)
@@ -542,8 +796,12 @@ class PySCFEmbed(Embed):
         j = self._mean_field.get_j(dm = density)
         k = np.zeros([self._n_basis_functions, self._n_basis_functions])
         two_e_term =  self._mean_field.get_veff(self._mol, density)
-        e_xc = two_e_term.exc
-        v_xc = two_e_term - j 
+        if self.keywords['low_level'] == 'hf':
+            e_xc = 0.0
+            v_xc = 0.0 
+        else:
+            e_xc = two_e_term.exc
+            v_xc = two_e_term - j 
 
         # Energy
         e = self.dot(density, self.h_core + j/2) + e_xc
@@ -591,9 +849,14 @@ class PySCFEmbed(Embed):
         beta_k = np.zeros([self._n_basis_functions, self._n_basis_functions])
         two_e_term =  self._mean_field.get_veff(self._mol, [alpha_density,
             beta_density])
-        e_xc = two_e_term.exc
-        alpha_v_xc = two_e_term[0] - (j[0] + j[1])
-        beta_v_xc = two_e_term[1] - (j[0]+j[1])
+        if self.keywords['low_level'] == 'hf':
+            e_xc = 0.0
+            alpha_v_xc = 0.0
+            beta_v_xc = 0.0
+        else:
+            e_xc = two_e_term.exc
+            alpha_v_xc = two_e_term[0] - (j[0] + j[1])
+            beta_v_xc = two_e_term[1] - (j[0]+j[1])
 
         # Energy
         e = (self.dot(self.h_core, alpha_density + beta_density)
@@ -602,6 +865,422 @@ class PySCFEmbed(Embed):
 
         return e, e_xc, alpha_j, beta_j, alpha_k, beta_k, alpha_v_xc, beta_v_xc
         
+    def unrestricted_make_FNO(self, no_cl_shift, thresh=1e-6, pct_occ=None, nvir_act=None, frozen=None):
+    
+        emb_mf = self._mean_field
+        n_frozen_core = self.keywords['n_frozen_core']
+        # Run embedded MP2 in canonical basis
+        if self.keywords['density_fitting'] == True:
+            for i in range(2):
+                emb_mf.mo_coeff[i] = np.hstack((emb_mf.mo_coeff[i][:,frozen], 
+                                                emb_mf.mo_coeff[i][:,n_frozen_core:no_cl_shift]))
+                emb_mf.mo_occ[i] = np.hstack(([1.]*len(frozen), 
+                                              emb_mf.mo_occ[i][n_frozen_core:no_cl_shift]))
+                emb_mf.mo_energy[i] = np.hstack((emb_mf.mo_energy[i][frozen],
+                                                 emb_mf.mo_energy[i][n_frozen_core:no_cl_shift]))
+            n_frozen = len(frozen)
+            if self.keywords['aux_basis'] is not None:
+                emb_dfmp2 = DFUMP2(emb_mf, n_frozen, auxbasis=self.keywords['aux_basis']).run()
+            else:
+                emb_dfmp2 = DFUMP2(emb_mf, n_frozen).run()
+            maskact = ~emb_dfmp2.frozen_mask
+            maskocc = [emb_mf.mo_occ[s]>1e-6 for s in [0,1]]
+            # dm for a and b spin
+            dmab = emb_dfmp2.make_rdm1()
+        else:
+            emb_mp2 = mp.MP2(emb_mf).set(frozen = frozen).run()
+            # dm for a and b spin
+            dmab = emb_mp2.make_rdm1(t2=None, with_frozen=False)
+    
+            maskact = emb_mp2.get_frozen_mask()
+            # obtain number of frz occ, act occ, act vir, frz vir
+            maskocc = [emb_mp2.mo_occ[s]>1e-6 for s in [0,1]]
+
+        masks = []
+        for s in [0,1]:
+            masks.append([
+                maskocc[s]  & ~maskact[s],  # frz occ
+                maskocc[s]  &  maskact[s],  # act occ
+                ~maskocc[s] &  maskact[s],  # act vir
+                ~maskocc[s] & ~maskact[s],  # frz vir
+            ])
+
+        if nvir_act is not None:
+            if isinstance(nvir_act, (int, np.integer)):
+                nvir_act = [nvir_act]*2
+    
+        no_frozen = []
+        no_coeff = []
+        orbital_energies = []
+        # loop over a and b spin
+        for s,dm in enumerate(dmab):
+            if self.keywords['density_fitting'] == True:
+                nocc = emb_dfmp2.nocc[s]
+                nmo = emb_dfmp2.nmo
+            else:
+                nocc = emb_mp2.nocc[s]
+                nmo = emb_mp2.nmo[s]
+            nvir = nmo - nocc
+            # get NOONs (n) and NOs eigenvalues (v)
+            n,v = np.linalg.eigh(dm[nocc:,nocc:])
+            idx = np.argsort(n)[::-1]
+            # sort NOONs and eigvs from largest to smallest NOON
+            n,v = n[idx], v[:,idx]
+            n *= 2  # to match RHF when using same thresh
+            print(f'occupation numbers = {n}')
+    
+            if nvir_act is None:
+                if pct_occ is None:
+                    # Keep NOs above given threshold
+                    nvir_keep = np.count_nonzero(n>thresh)
+                else:
+                    # Keep given percentage of NOs
+                    cumsum = np.cumsum(n/np.sum(n))
+                    nvir_keep = np.count_nonzero(
+                        [c <= pct_occ or np.isclose(c, pct_occ) for c in cumsum])
+            else:
+                # Keep fixed number of virtuals
+                nvir_keep = min(nvir, nvir_act[s])
+
+            # Get MO energies for different sectors
+            moeoccfrz0, moeocc, moevir, moevirfrz0 = [emb_mf.mo_energy[s][m] for m in masks[s]]
+            # Get MO coeffs for different sectors
+            orboccfrz0, orbocc, orbvir, orbvirfrz0 = [emb_mf.mo_coeff[s][:,m] for m in masks[s]]
+
+            # Collect active virtual MO energies into list
+            fvv = np.diag(moevir)
+            # natural orbital fock
+            fvv_no = np.dot(v.T, np.dot(fvv, v))
+            e_vir_canon, v_canon = np.linalg.eigh(fvv_no[:nvir_keep,:nvir_keep])
+
+            # Transform to AO basis?
+            orbviract = np.dot(orbvir, np.dot(v[:,:nvir_keep], v_canon))
+            orbvirfrz = np.dot(orbvir, v[:,nvir_keep:])
+
+            # Collect different spaces
+            # Orbitals
+            no_comp = (orboccfrz0, orbocc, orbviract, orbvirfrz, orbvirfrz0)
+            no_coeff.append(np.hstack(no_comp))
+            # Energies
+            mo_e = (moeoccfrz0, moeocc, e_vir_canon, moevir[nvir_keep:], moevirfrz0)
+            orbital_energies.append(np.array(np.hstack(mo_e)))
+
+            # Define frozen orbitals
+            nocc_loc = np.cumsum([0]+[x.shape[1] for x in no_comp]).astype(int)
+            # Create lists with indices of frozen occ and virt orbitals
+            no_frozen.append(np.hstack((np.arange(nocc_loc[0], nocc_loc[1]),
+                                           np.arange(nocc_loc[3], nocc_loc[5]))).astype(int))
+
+        return no_coeff, orbital_energies, no_frozen
+
+    def restricted_make_FNO(self, no_cl_shift, nvir_act, frozen = None):
+        
+        emb_mf = self._mean_field
+        n_frozen_core = self.keywords['n_frozen_core']
+        # Run embedded MP2 in canonical basis
+        if self.keywords['density_fitting'] == True:
+            emb_mf.mo_coeff = np.hstack((emb_mf.mo_coeff[:,frozen], 
+                                            emb_mf.mo_coeff[:,n_frozen_core:no_cl_shift]))
+            emb_mf.mo_occ = np.hstack(([2.] * len(frozen), 
+                                       emb_mf.mo_occ[n_frozen_core:no_cl_shift]))
+            emb_mf.mo_energy = np.hstack((emb_mf.mo_energy[frozen],
+                                             emb_mf.mo_energy[n_frozen_core:no_cl_shift]))
+            n_frozen = len(frozen)
+            if self.keywords['aux_basis'] is not None:
+                emb_dfmp2 = DFRMP2(emb_mf, n_frozen, auxbasis=self.keywords['aux_basis']).run()
+            else:
+                emb_dfmp2 = DFRMP2(emb_mf, n_frozen).run()
+            maskact = ~emb_dfmp2.frozen_mask
+            maskocc = emb_mf.mo_occ>1e-6
+            # dm for a and b spin
+            dm = emb_dfmp2.make_rdm1()
+        else:
+            emb_mp2 = mp.MP2(emb_mf).set(frozen = frozen).run()
+            # Construct FNOs (inspired by `mp.make_fno`)
+            dm = emb_mp2.make_rdm1(t2=None, with_frozen=False)
+            maskact = emb_mp2.get_frozen_mask()
+            maskocc = emb_mp2.mo_occ>1e-6
+
+        masks = [maskocc  & ~maskact,    # frz occ
+                 maskocc  &  maskact,    # act occ
+                 ~maskocc &  maskact,    # act vir
+                 ~maskocc & ~maskact]    # frz vir
+        
+        if self.keywords['density_fitting'] == True:
+            nocc = emb_dfmp2.nocc
+            nmo = emb_dfmp2.nmo
+        else:
+            nocc = emb_mp2.nocc
+            nmo = emb_mp2.nmo
+        #nmo = emb_mp2.nmo
+        #nocc = emb_mp2.nocc
+        nvir = nmo - nocc
+        n,v = np.linalg.eigh(dm[nocc:,nocc:])
+        idx = np.argsort(n)[::-1]
+        n,v = n[idx], v[:,idx]
+        print(f'occupation numbers = {n}')
+        
+        nvir_keep = min(nvir, nvir_act)
+
+        # mo energies
+        moeoccfrz0, moeocc, moevir, moevirfrz0 = [emb_mf.mo_energy[m] for m in masks]
+        # mo coefficients
+        orboccfrz0, orbocc, orbvir, orbvirfrz0 = [emb_mf.mo_coeff[:,m] for m in masks]
+        
+        # Canonicalize
+        # canonical fock
+        fvv = np.diag(moevir)
+        # natural orbital fock
+        fvv_no = np.dot(v.T, np.dot(fvv, v))
+        e_vir_canon, v_canon = np.linalg.eigh(fvv_no[:nvir_keep,:nvir_keep])
+        
+        # Transform to ?AO? basis
+        orbviract = np.dot(orbvir, np.dot(v[:,:nvir_keep], v_canon))
+        orbvirfrz = np.dot(orbvir, v[:,nvir_keep:])
+
+        # Collect different spaces
+        # Orbitals
+        no_comp = (orboccfrz0, orbocc, orbviract, orbvirfrz, orbvirfrz0)
+        orbitals = np.hstack(no_comp)
+        # Energies
+        mo_e = (moeoccfrz0, moeocc, e_vir_canon, moevir[nvir_keep:], moevirfrz0)
+        orbital_energies = np.array(np.hstack(mo_e))
+
+        # Define frozen orbitals
+        nocc_loc = np.cumsum([0]+[x.shape[1] for x in no_comp]).astype(int)
+        no_frozen = np.hstack((np.arange(nocc_loc[0], nocc_loc[1]),
+                                  np.arange(nocc_loc[3], nocc_loc[5]))).astype(int)
+            
+        ## Transform 2e integrals
+        # Not needed, this is done in MP2 kernel `_make_eris`! Keeping code here as reference.
+        #co = np.asarray(orbocc, order='F')
+        #cv = np.asarray(orbviract, order='F')
+        #g_mo_sf = ao2mo.general(emb_mf._eri, (co,cv,co,cv), compact=False)
+
+        ## Construct eris array
+        #act_mo_energy = np.array(list(moeocc)+list(e_vir_canon))
+        #eris = lib.tag_array(g_mo_sf, ovov = g_mo_sf, mo_energy = act_mo_energy)
+        
+        #return orbitals, orbital_energies, no_frozen, eris
+        return orbitals, orbital_energies, no_frozen
+
+    def custom_FNO_MP2(self, emb_mf, n_vir_nos, frozen = None):
+        # Construct FNOs and perform FNO-MP2 without using pyscf functions. Was
+        # used for debugging. Keeping it here for future reference.
+        
+        # Run embedded MP2 in canonical basis
+        emb_mp2 = mp.MP2(emb_mf).set(frozen = frozen).run()
+
+        # Construct FNOs (copied from `make_fno`)
+        t2 = None
+        nvir_act = n_vir_nos
+
+        mf = emb_mf
+        dm = emb_mp2.make_rdm1(t2=t2, with_frozen=False)
+        
+        nmo = emb_mp2.nmo
+        nocc = emb_mp2.nocc
+        nvir = nmo - nocc
+        n,v = np.linalg.eigh(dm[nocc:,nocc:])
+        idx = np.argsort(n)[::-1]
+        n,v = n[idx], v[:,idx]
+        print(f'occupation numbers = {n}')
+        
+        nvir_keep = min(nvir, nvir_act)
+
+        maskact = emb_mp2.get_frozen_mask()
+        maskocc = emb_mp2.mo_occ>1e-6
+        masks = [maskocc  & ~maskact,    # frz occ
+                 maskocc  &  maskact,    # act occ
+                 ~maskocc &  maskact,    # act vir
+                 ~maskocc & ~maskact]    # frz vir
+
+        # mo energies
+        moeoccfrz0, moeocc, moevir, moevirfrz0 = [mf.mo_energy[m] for m in masks]
+        # mo coefficients
+        orboccfrz0, orbocc, orbvir, orbvirfrz0 = [mf.mo_coeff[:,m] for m in masks]
+        
+        # Canonicalize
+        # canonical fock
+        fvv = np.diag(moevir)
+        # natural orbital fock
+        fvv_no = np.dot(v.T, np.dot(fvv, v))
+        e_vir_canon, v_canon = np.linalg.eigh(fvv_no[:nvir_keep,:nvir_keep])
+        
+        # Transform to ?AO? basis
+        orbviract = np.dot(orbvir, np.dot(v[:,:nvir_keep], v_canon))
+        orbvirfrz = np.dot(orbvir, v[:,nvir_keep:])
+
+        # Collect different spaces
+        no_comp = (orboccfrz0, orbocc, orbviract, orbvirfrz, orbvirfrz0)
+        no_coeff = np.hstack(no_comp)
+
+        # Define frozen orbitals
+        nocc_loc = np.cumsum([0]+[x.shape[1] for x in no_comp]).astype(int)
+        no_frozen = np.hstack((np.arange(nocc_loc[0], nocc_loc[1]),
+                                  np.arange(nocc_loc[3], nocc_loc[5]))).astype(int)
+            
+        ## Calculate MP2 in FNO basis
+        fno_mp2 = mp.MP2(emb_mf, mo_coeff=no_coeff, frozen = no_frozen).run()
+        fno_e_corr = fno_mp2.e_corr
+
+        # Determine new nocc
+        if no_frozen is None:
+            nocc = np.count_nonzero(emb_mf.mo_occ > 0)
+            assert (nocc > 0)
+        elif isinstance(no_frozen, (int, np.integer)):
+            nocc = np.count_nonzero(emb_mf.mo_occ > 0) - no_frozen
+            assert (nocc > 0)
+        elif isinstance(no_frozen[0], (int, np.integer)):
+            occ_idx = emb_mf.mo_occ > 0
+            occ_idx[list(no_frozen)] = False
+            nocc = np.count_nonzero(occ_idx)
+            assert (nocc > 0)
+        else:
+            print('nocc Not working')
+
+        # Determine new nmo
+        if no_frozen is None:
+            nmo = len(emb_mf.mo_occ)
+        elif isinstance(no_frozen, (int, np.integer)):
+            nmo = len(emb_mf.mo_occ) - no_frozen
+        elif isinstance(no_frozen[0], (int, np.integer)):
+            nmo = len(emb_mf.mo_occ) - len(set(no_frozen))
+        else:
+            print('nmo Not working')
+
+        print('******** Custom FNO-MP2 ********')
+        print('nocc = %s, nmo = %s' % (nocc, nmo))
+        if frozen is not None:
+            print('frozen orbitals %s' % frozen)
+
+        # Get HF energy, which is needed for total MP2 energy.
+        print('I am in `get_e_hf`')
+        dm   = emb_mf.make_rdm1(no_coeff, emb_mf.mo_occ)
+        vhf  = emb_mf.get_veff(emb_mf.mol, dm)
+        e_hf = emb_mf.energy_tot(dm=dm, vhf=vhf)
+        print(f'{e_hf = }')
+        print(f'{emb_mf.e_tot = }')
+        print(f'{emb_mf.mo_energy = }')
+
+        no_comp = (orbocc, orbviract)
+        act_no_coeff = np.hstack(no_comp)
+
+        print(f'I am rebuilding the fock matrix')
+        dm     = emb_mf.make_rdm1(no_coeff, emb_mf.mo_occ)
+        vhf    = emb_mf.get_veff(emb_mf.mol, dm)
+        fockao = emb_mf.get_fock(vhf=vhf, dm=dm)
+        fock = act_no_coeff.conj().T.dot(fockao).dot(act_no_coeff)
+        print(f'{fock[nocc] = }')
+        mo_energy = fock.diagonal().real
+
+        print("Building fock matrix Fabijan's way")
+        #active_mo_energy = []
+        #for e,i in enumerate(emb_mf.mo_energy):
+        #    if e not in no_frozen:
+        #        active_mo_energy.append(i)
+        active_mo_energy = np.hstack((moeocc, moevir))
+
+        C_occ = np.identity(nocc)
+        # nmo = number of active orbitals
+        # nocc + nvir = including all NOs
+        C_tot = np.zeros((nocc+nvir, nmo))
+        C_tot[:nocc, :nocc] = C_occ
+        # v = non-canonicalized NOs
+        C_tot[nocc:, nocc:] = v[:,:nvir_keep]
+        print(f'{v[:,:nvir_keep].shape = }')
+
+        
+        f_mo_sf = np.diag(active_mo_energy)
+        f_mo_FNO = np.dot(C_tot.T, np.dot(f_mo_sf, C_tot))
+        #e_vir_canon, NO_canon = np.linalg.eigh(f_mo_FNO[nocc:,nocc:])
+        print('e_vir_canon = ', e_vir_canon)
+        print(f'{C_tot.shape = }')
+
+        print(f'{act_no_coeff.shape = }')
+        print(f'{C_tot.shape = }')
+
+        # Construct g_mo_sf!
+        print(f'{emb_mp2.mo_coeff.shape = }')
+        not_frozen = []
+        for i in range(emb_mf.mo_coeff.shape[1]):
+            if i not in frozen:
+                not_frozen.append(i)
+        co = np.asarray(orbocc, order='F')
+        #C_ao_canon_fno = np.dot(emb_mf.mo_coeff[:,not_frozen][:,nocc:], np.dot(v[:,:nvir_keep], NO_canon))
+        #cv = np.asarray(C_ao_canon_fno, order='F')
+        cv = np.asarray(orbviract, order='F')
+        print(f'{emb_mf._eri.shape = }')
+        print(f'{emb_mf._eri.size = }')
+        print(f'{co.shape[0]**4 = }')
+
+        print(f'{ao2mo.restore(1, emb_mf._eri, co.shape[0]).shape = }')
+        print(f'{ao2mo.restore(1, emb_mf._eri, co.shape[0]).size = }')
+        #emb_mf._eri = ao2mo.restore(1, emb_mf._eri, co.shape[0])
+
+        g_mo_sf = ao2mo.general(emb_mf._eri, (co,cv,co,cv), compact=False)
+        print(f'{g_mo_sf.shape = }')
+
+        eris = lib.tag_array(g_mo_sf, ovov = g_mo_sf, mo_energy = list(moeocc)+list(e_vir_canon))
+        
+        print('Second kernel for calculating MP2 energy.')
+        print(f'{mo_energy.shape = }')
+        with_t2 = True
+        mo_energy = np.array(eris.mo_energy)
+        print(f'{mo_energy.shape = }')
+    
+        nocc = nocc
+        nvir = nmo - nocc
+        eia = mo_energy[:nocc,None] - mo_energy[None,nocc:]
+    
+        if with_t2:
+            t2 = np.empty((nocc,nocc,nvir,nvir), dtype=eris.ovov.dtype)
+        else:
+            t2 = None
+    
+        emp2_ss = emp2_os = 0
+        for i in range(nocc):
+            if isinstance(eris.ovov, np.ndarray) and eris.ovov.ndim == 4:
+                # When mf._eri is a custom integrals with the shape (n,n,n,n), the
+                # ovov integrals might be in a 4-index tensor.
+                gi = eris.ovov[i]
+            else:
+                gi = np.asarray(eris.ovov[i*nvir:(i+1)*nvir])
+    
+            gi = gi.reshape(nvir,nocc,nvir).transpose(1,0,2)
+            t2i = gi.conj()/lib.direct_sum('jb+a->jba', eia, eia[i])
+            edi = np.einsum('jab,jab', t2i, gi) * 2
+            exi = -np.einsum('jab,jba', t2i, gi)
+            emp2_ss += edi*0.5 + exi
+            emp2_os += edi*0.5
+            if with_t2:
+                t2[i] = t2i
+    
+        emp2_ss = emp2_ss.real
+        emp2_os = emp2_os.real
+        emp2 = lib.tag_array(emp2_ss+emp2_os, e_corr_ss=emp2_ss, e_corr_os=emp2_os)
+
+        print(f'{float(emp2) = }')
+        print(f'{float(emp2.e_corr_ss) = }')
+        print(f'{float(emp2.e_corr_os) = }')
+
+        fno_e_corr = float(emp2)
+        ##### PySCF MP2 continues below
+
+        #mo_energy = None
+        #if emb_mf.converged:
+        #    # init_amps redirects to kernel in beginning of file.
+        #    e_corr, t2 = emb_mf.init_amps(mo_energy, no_coeff, eris)
+        #else:
+        #    converged, e_corr, t2 = _iterative_kernel(emb_mf, eris)
+
+        #e_corr_ss = getattr(self.e_corr, 'e_corr_ss', 0)
+        #e_corr_os = getattr(self.e_corr, 'e_corr_os', 0)
+        #fno_e_corr = float(self.e_corr)
+
+        #self._finalize()
+        return fno_e_corr
+
     def correlation_energy(self, span_orbitals = None, kernel_orbitals = None,
         span_orbital_energies = None, kernel_orbital_energies = None):
         """
@@ -625,10 +1304,37 @@ class PySCFEmbed(Embed):
             Correlation energy of the span_orbitals.
         """
 
+        emb_mf = self._mean_field
+        n_vir_nos = self.keywords['n_vir_nos']
         shift = self._n_basis_functions - self.n_env_mos
+        if self.keywords['partition_method'] == 'pm' or self.keywords['partition_method'] == 'boys':
+            no_cl_shift = self._n_basis_functions - self.n_env_mos 
+        else:
+            no_cl_shift = self._n_basis_functions - self.n_all_env_mos 
         if span_orbitals is None:
             # If not using CL orbitals, just freeze the level-shifted MOs
-            frozen_orbitals = [i for i in range(shift, self._n_basis_functions)]
+            if self.keywords['n_frozen_core'] != 0:
+                frozen_orbitals_env = [i for i in range(no_cl_shift, self._n_basis_functions)]
+                frozen_core = [i for i in range(self.keywords['n_frozen_core'])]
+                frozen_orbitals = frozen_core + frozen_orbitals_env
+            else:
+                frozen_orbitals = [i for i in range(no_cl_shift, self._n_basis_functions)]
+            # Construct FNOs
+            if self.keywords['n_vir_nos'] is not None and not self.keywords['high_level'] == 'fno-mp2':
+                if self.keywords['high_level_reference'] == 'rhf':
+                    orbitals, orbital_energies, frozen_orbitals = self.restricted_make_FNO(
+                                                                  no_cl_shift,
+                                                                  n_vir_nos,
+                                                                  frozen = frozen_orbitals)
+                elif self.keywords['high_level_reference'] == 'uhf':
+                    orbitals, orbital_energies, frozen_orbitals = self.unrestricted_make_FNO(
+                                                                  no_cl_shift,
+                                                                  nvir_act=n_vir_nos, 
+                                                                  frozen = frozen_orbitals)
+                else:
+                    print('ROHF not implemented')
+                self._mean_field.mo_energy = orbital_energies
+                self._mean_field.mo_coeff = orbitals
         else:
             # Preparing orbitals and energies for CL shell
             effective_orbitals = np.hstack((span_orbitals, kernel_orbitals))
@@ -647,9 +1353,23 @@ class PySCFEmbed(Embed):
             self._mean_field.mo_coeff = orbitals
 
         if self.keywords['high_level'].lower() == 'mp2':
-            #embedded_wf = mp.MP2(self._mean_field).run()
-            embedded_wf = mp.MP2(self._mean_field).set(frozen = frozen_orbitals).run()
+            #if self.keywords['n_vir_nos'] is not None:
+            #    embedded_wf = mp.MP2(self._mean_field, frozen = frozen_orbitals)
+            #    embedded_wf.kernel()
+            #else:
+            #if self.keywords['density_fitting'] == True:
+            #    if self.keywords['high_level_reference'] == 'rhf':
+            #        embedded_wf = DFRMP2(self._mean_field, frozen = frozen_orbitals).run()
+            #    elif self.keywords['high_level_reference'] == 'uhf':
+            #        embedded_wf = DFUMP2(self._mean_field, frozen = frozen_orbitals).run()
+            #else:
+            #    embedded_wf = mp.MP2(self._mean_field, frozen = frozen_orbitals).run()
+            embedded_wf = mp.MP2(self._mean_field, frozen = frozen_orbitals).run()
             correlation_energy = embedded_wf.e_corr
+
+        if self.keywords['high_level'].lower() == 'fno-mp2':
+            correlation_energy = self.custom_FNO_MP2(emb_mf, n_vir_nos, frozen = frozen_orbitals)
+
         if (self.keywords['high_level'].lower() == 'ccsd' or 
             self.keywords['high_level'].lower() == 'ccsd(t)'):
             embedded_wf = cc.CCSD(self._mean_field).set(frozen = frozen_orbitals).run()
