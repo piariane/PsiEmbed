@@ -7,6 +7,7 @@ from pyscf import gto, dft, scf, lib, mp, cc, lo, ao2mo
 from pyscf.mp.dfmp2_native import DFRMP2
 from pyscf.mp.dfump2_native import DFUMP2
 from pyscf.tools import molden
+from pyscf.solvent import pcm
 #import os
 
 class Embed:
@@ -583,10 +584,10 @@ class PySCFEmbed(Embed):
                 # Start new SCF with new density matrix
                 b.scf(dm_u)
                 self._mean_field = b
-                #self._mean_field.mo_occ[0][swap[0]] = 1
-                #self._mean_field.mo_occ[0][swap[1]] = 0
-                #self._mean_field.mo_coeff[0][:,swap[0]] = b.mo_coeff[0][:,swap[1]]
-                #self._mean_field.mo_coeff[0][:,swap[1]] = b.mo_coeff[0][:,swap[0]]
+                self._mean_field.mo_occ[0][swap[0]] = 1
+                self._mean_field.mo_occ[0][swap[1]] = 0
+                self._mean_field.mo_coeff[0][:,swap[0]] = b.mo_coeff[0][:,swap[1]]
+                self._mean_field.mo_coeff[0][:,swap[1]] = b.mo_coeff[0][:,swap[0]]
 
             if self.keywords['low_level'] == 'hf':
                 self.v_xc_total = 0.0
@@ -623,47 +624,47 @@ class PySCFEmbed(Embed):
                 self._mean_field.kernel(dm0=(self.alpha_act_density, self.beta_act_density))
             #if self.keywords['analyze_scf']:
             #    self._mean_field.analyze()
-            if self.keywords['do_frag_delta_scf'] == True: # Hasn't been tested !!
-                if self.keywords['lowest_level_molden']:
-                    mf = self._mean_field
-                    mol = self._mol
-                    molden_file = self.keywords['lowest_level_molden']
-                    with open('alpha_'+molden_file, 'w') as f1:
-                        molden.header(mol, f1)
-                        molden.orbital_coeff(mol, f1, mf.mo_coeff[0], ene=mf.mo_energy[0], occ=mf.mo_occ[0])
-                    with open('beta_'+molden_file, 'w') as f1:
-                        molden.header(mol, f1)
-                        molden.orbital_coeff(mol, f1, mf.mo_coeff[1], ene=mf.mo_energy[1], occ=mf.mo_occ[1])
-                mo0 = self._mean_field.mo_coeff
-                occ0 = self._mean_field.mo_occ
-                swap = self.keywords['swap_orbitals']
-                occ0[0][swap[0]] = 0
-                occ0[0][swap[1]] = 1
-                # New SCF caculation 
-                b = scf.UKS(self._mol)
-                if self.keywords['low_level_reference'].lower() == 'rhf':
-                    b.mol.nelectron = 2*self.n_act_mos
-                    # Check whether this is valid when using FNOs
-                    b.get_hcore = lambda *args: v_emb + self.h_core
-                if (self.keywords['low_level_reference'].lower() == 'rohf'
-                    or self.keywords['low_level_reference'].lower() == 'uhf'):
-                    b.mol.nelectron = self.n_act_mos + self.beta_n_act_mos
-                    b.get_vemb = lambda *args: v_emb
-                b.xc = self.keywords['low_level']
-                #if self.keywords['delta_checkfile'] is not None:
-                #    b.chkfile = self.keywords['delta_checkfile']
-                #    b.init_guess = 'chkfile'
-                # Construct new dnesity matrix with new occpuation pattern
-                dm_u = b.make_rdm1(mo0, occ0)
-                # Apply mom occupation principle
-                b = scf.addons.mom_occ(b, mo0, occ0)
-                # Start new SCF with new density matrix
-                b.scf(dm_u)
-                self._mean_field = b
-                self._mean_field.mo_occ[0][swap[0]] = 1
-                self._mean_field.mo_occ[0][swap[1]] = 0
-                self._mean_field.mo_coeff[0][:,swap[0]] = b.mo_coeff[0][:,swap[1]]
-                self._mean_field.mo_coeff[0][:,swap[1]] = b.mo_coeff[0][:,swap[0]]
+            #if self.keywords['do_frag_delta_scf'] == True: # Hasn't been tested !!
+            #    if self.keywords['lowest_level_molden']:
+            #        mf = self._mean_field
+            #        mol = self._mol
+            #        molden_file = self.keywords['lowest_level_molden']
+            #        with open('alpha_'+molden_file, 'w') as f1:
+            #            molden.header(mol, f1)
+            #            molden.orbital_coeff(mol, f1, mf.mo_coeff[0], ene=mf.mo_energy[0], occ=mf.mo_occ[0])
+            #        with open('beta_'+molden_file, 'w') as f1:
+            #            molden.header(mol, f1)
+            #            molden.orbital_coeff(mol, f1, mf.mo_coeff[1], ene=mf.mo_energy[1], occ=mf.mo_occ[1])
+            #    mo0 = self._mean_field.mo_coeff
+            #    occ0 = self._mean_field.mo_occ
+            #    swap = self.keywords['swap_orbitals']
+            #    occ0[0][swap[0]] = 0
+            #    occ0[0][swap[1]] = 1
+            #    # New SCF caculation 
+            #    b = scf.UKS(self._mol)
+            #    if self.keywords['low_level_reference'].lower() == 'rhf':
+            #        b.mol.nelectron = 2*self.n_act_mos
+            #        # Check whether this is valid when using FNOs
+            #        b.get_hcore = lambda *args: v_emb + self.h_core
+            #    if (self.keywords['low_level_reference'].lower() == 'rohf'
+            #        or self.keywords['low_level_reference'].lower() == 'uhf'):
+            #        b.mol.nelectron = self.n_act_mos + self.beta_n_act_mos
+            #        b.get_vemb = lambda *args: v_emb
+            #    b.xc = self.keywords['low_level']
+            #    #if self.keywords['delta_checkfile'] is not None:
+            #    #    b.chkfile = self.keywords['delta_checkfile']
+            #    #    b.init_guess = 'chkfile'
+            #    # Construct new dnesity matrix with new occpuation pattern
+            #    dm_u = b.make_rdm1(mo0, occ0)
+            #    # Apply mom occupation principle
+            #    b = scf.addons.mom_occ(b, mo0, occ0)
+            #    # Start new SCF with new density matrix
+            #    b.scf(dm_u)
+            #    self._mean_field = b
+            #    self._mean_field.mo_occ[0][swap[0]] = 1
+            #    self._mean_field.mo_occ[0][swap[1]] = 0
+            #    self._mean_field.mo_coeff[0][:,swap[0]] = b.mo_coeff[0][:,swap[1]]
+            #    self._mean_field.mo_coeff[0][:,swap[1]] = b.mo_coeff[0][:,swap[0]]
 
         if self.keywords['low_level_reference'] == 'rhf':
             docc = (self._mean_field.mo_occ == 2).sum()
