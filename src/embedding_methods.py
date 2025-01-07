@@ -531,21 +531,40 @@ class PySCFEmbed(Embed):
         self._mol.charge = self.keywords['charge']
         if v_emb is None: # low-level/environment calculation
             self._mol.output = self.keywords['driver_output']
-            if self.keywords['low_level'] == 'hf':
-                if self.keywords['low_level_reference'].lower() == 'rhf':
-                    self._mean_field = scf.RHF(self._mol)
-                if self.keywords['low_level_reference'].lower() == 'uhf':
-                    self._mean_field = scf.UHF(self._mol)
-                if self.keywords['low_level_reference'].lower() == 'rohf':
-                    self._mean_field = scf.ROHF(self._mol)
-                self.e_xc = 0.0
+            if self.keywords['PCM'] == True:
+                if self.keywords['low_level'] == 'hf':
+                    if self.keywords['low_level_reference'].lower() == 'rhf':
+                        self._mean_field = scf.RHF(self._mol).PCM()
+                    if self.keywords['low_level_reference'].lower() == 'uhf':
+                        self._mean_field = scf.UHF(self._mol).PCM()
+                    if self.keywords['low_level_reference'].lower() == 'rohf':
+                        self._mean_field = scf.ROHF(self._mol).PCM()
+                    self.e_xc = 0.0
+                else:
+                    if self.keywords['low_level_reference'].lower() == 'rhf':
+                        self._mean_field = dft.RKS(self._mol).PCM()
+                    if self.keywords['low_level_reference'].lower() == 'uhf':
+                        self._mean_field = dft.UKS(self._mol).PCM()
+                    if self.keywords['low_level_reference'].lower() == 'rohf':
+                        self._mean_field = dft.ROKS(self._mol).PCM()
+                self._mean_field.with_solvent.eps = self.keywords['eps']
+                self._mean_field.with_solvent.method = 'C-PCM'
             else:
-                if self.keywords['low_level_reference'].lower() == 'rhf':
-                    self._mean_field = dft.RKS(self._mol)
-                if self.keywords['low_level_reference'].lower() == 'uhf':
-                    self._mean_field = dft.UKS(self._mol)
-                if self.keywords['low_level_reference'].lower() == 'rohf':
-                    self._mean_field = dft.ROKS(self._mol)
+                if self.keywords['low_level'] == 'hf':
+                    if self.keywords['low_level_reference'].lower() == 'rhf':
+                        self._mean_field = scf.RHF(self._mol)
+                    if self.keywords['low_level_reference'].lower() == 'uhf':
+                        self._mean_field = scf.UHF(self._mol)
+                    if self.keywords['low_level_reference'].lower() == 'rohf':
+                        self._mean_field = scf.ROHF(self._mol)
+                    self.e_xc = 0.0
+                else:
+                    if self.keywords['low_level_reference'].lower() == 'rhf':
+                        self._mean_field = dft.RKS(self._mol)
+                    if self.keywords['low_level_reference'].lower() == 'uhf':
+                        self._mean_field = dft.UKS(self._mol)
+                    if self.keywords['low_level_reference'].lower() == 'rohf':
+                        self._mean_field = dft.ROKS(self._mol)
             self._mean_field.conv_tol = self.keywords['e_convergence']
             self._mean_field.xc = self.keywords['low_level']
             #CPi turn on soscf
@@ -593,18 +612,28 @@ class PySCFEmbed(Embed):
                 self.v_xc_total = 0.0
                 self.e_xc_total = 0.0
             else:
-                self.v_xc_total = self._mean_field.get_veff()
-                self.e_xc_total = self._mean_field.get_veff().exc
+                dm_low_level = self._mean_field.make_rdm1()
+                self.v_xc_total = self._mean_field.get_veff(self._mol, dm_low_level)
+                self.e_xc_total = self._mean_field.get_veff(self._mol, dm_low_level).exc
         else: # high-level
-            if self.keywords['high_level_reference'].lower() == 'rhf':
-                self._mean_field = scf.RHF(self._mol)
-            if self.keywords['high_level_reference'].lower() == 'uhf':
-                self._mean_field = scf.UHF(self._mol)
-            if self.keywords['high_level_reference'].lower() == 'rohf':
-                self._mean_field = scf.ROHF(self._mol)
+            if self.keywords['PCM'] == True:
+                if self.keywords['high_level_reference'].lower() == 'rhf':
+                    self._mean_field = scf.RHF(self._mol).PCM()
+                if self.keywords['high_level_reference'].lower() == 'uhf':
+                    self._mean_field = scf.UHF(self._mol).PCM()
+                if self.keywords['high_level_reference'].lower() == 'rohf':
+                    self._mean_field = scf.ROHF(self._mol).PCM()
+                self._mean_field.with_solvent.eps = self.keywords['eps']
+                self._mean_field.with_solvent.method = 'C-PCM'
+            else:
+                if self.keywords['high_level_reference'].lower() == 'rhf':
+                    self._mean_field = scf.RHF(self._mol)
+                if self.keywords['high_level_reference'].lower() == 'uhf':
+                    self._mean_field = scf.UHF(self._mol)
+                if self.keywords['high_level_reference'].lower() == 'rohf':
+                    self._mean_field = scf.ROHF(self._mol)
             if self.keywords['low_level_reference'].lower() == 'rhf':
                 self._mol.nelectron = 2*self.n_act_mos
-                # Check whether this is valid when using FNOs
                 self._mean_field.get_hcore = lambda *args: v_emb + self.h_core
             if (self.keywords['low_level_reference'].lower() == 'rohf'
                 or self.keywords['low_level_reference'].lower() == 'uhf'):
@@ -621,7 +650,7 @@ class PySCFEmbed(Embed):
             if self.keywords['high_level_reference'] == 'rhf':
                 self._mean_field.kernel(dm0=self.act_density)
             else:
-                self._mean_field.kernel(dm0=(self.alpha_act_density, self.beta_act_density))
+                self._mean_field.kernel(dm0=np.asarray([self.alpha_act_density, self.beta_act_density]))
             #if self.keywords['analyze_scf']:
             #    self._mean_field.analyze()
             #if self.keywords['do_frag_delta_scf'] == True: # Hasn't been tested !!
@@ -693,8 +722,9 @@ class PySCFEmbed(Embed):
             self.beta_j = j[1]
             self.alpha_k = k[0]
             self.beta_k = k[1]
-            self.alpha_v_xc_total = self._mean_field.get_veff()[0] - j[0] - j[1]
-            self.beta_v_xc_total = self._mean_field.get_veff()[1] - j[0] - j[1]
+            dm_high_level = self._mean_field.make_rdm1()
+            self.alpha_v_xc_total = self._mean_field.get_veff(self._mol, dm_high_level)[0] - j[0] - j[1]
+            self.beta_v_xc_total  = self._mean_field.get_veff(self._mol, dm_high_level)[1] - j[0] - j[1]
 
         self.alpha = 0.0
         self._n_basis_functions = self._mol.nao
@@ -842,14 +872,17 @@ class PySCFEmbed(Embed):
         alpha_density = alpha_orbitals @ alpha_orbitals.T
         beta_density = beta_orbitals @ beta_orbitals.T
 
+        print(f'{alpha_density.shape = }')
+        print(f'{beta_density.shape = }')
+
         # J and K
         j = self._mean_field.get_j(dm = [alpha_density, beta_density])
         alpha_j = j[0]
         beta_j = j[1]
         alpha_k = np.zeros([self._n_basis_functions, self._n_basis_functions])
         beta_k = np.zeros([self._n_basis_functions, self._n_basis_functions])
-        two_e_term =  self._mean_field.get_veff(self._mol, [alpha_density,
-            beta_density])
+        two_e_term =  self._mean_field.get_veff(self._mol, np.asarray([alpha_density,
+            beta_density]))
         if self.keywords['low_level'] == 'hf':
             e_xc = 0.0
             alpha_v_xc = 0.0

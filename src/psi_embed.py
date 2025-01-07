@@ -117,6 +117,7 @@ def driver(keywords):
     default_keywords['low_level_molden'] = False
     default_keywords['frag_molden'] = False
     default_keywords['spade_method'] = 'old'
+    default_keywords['PCM'] = False
 
     # Checking if the necessary keywords have been defined
     assert 'low_level' in keywords, ('\n Choose level of theory',
