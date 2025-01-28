@@ -80,7 +80,8 @@ def driver(keywords):
     default_keywords['low_level_reference'] = 'rhf'
     default_keywords['high_level_reference'] = 'rhf'
     default_keywords['partition_method'] = 'spade'
-    default_keywords['e_convergence'] = 1e-6
+    default_keywords['e_convergence'] = 1e-9
+    default_keywords['e_convergence_frag'] = 1e-6
     default_keywords['d_convergence'] = 1e-6
     default_keywords['eri'] = 'df'
     default_keywords['ints_tolerance'] = 1e-10

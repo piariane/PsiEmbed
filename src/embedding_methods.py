@@ -593,6 +593,12 @@ class PySCFEmbed(Embed):
                 # New SCF caculation 
                 b = scf.UKS(self._mol)
                 b.xc = self.keywords['low_level']
+                b.max_cycle = 100
+                if self.keywords['delta_conv_tol'] is not None:
+                    b.conv_tol = self.keywords['delta_conv_tol']
+                if self.keywords['delta_conv_tol_grad'] is not None:
+                    b.conv_tol_grad = self.keywords['delta_conv_tol_grad']
+                    b.conv_check = False
                 #if self.keywords['delta_checkfile'] is not None:
                 #    b.chkfile = self.keywords['delta_checkfile']
                 #    b.init_guess = 'chkfile'
@@ -639,7 +645,8 @@ class PySCFEmbed(Embed):
                 or self.keywords['low_level_reference'].lower() == 'uhf'):
                 self._mol.nelectron = self.n_act_mos + self.beta_n_act_mos
                 self._mean_field.get_vemb = lambda *args: v_emb
-            self._mean_field.conv_tol = self.keywords['e_convergence']
+            self._mean_field.conv_tol = self.keywords['e_convergence_frag']
+            self._mean_field.max_cycle = 100
             if self.keywords['frag_checkfile'] is not None:
                 self._mean_field.chkfile = self.keywords['frag_checkfile']
                 self._mean_field.init_guess = 'chkfile'
